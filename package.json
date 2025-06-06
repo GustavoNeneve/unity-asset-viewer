@@ -3,6 +3,14 @@
   "displayName": "unity-asset-viewer",
   "description": "Visualizador de arquivos .asset da Unity",
   "version": "0.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gustavo-hillesheim/unity-asset-viewer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gustavo-hillesheim/unity-asset-viewer/issues"
+  },
+  "homepage": "https://github.com/gustavo-hillesheim/unity-asset-viewer#readme",
   "engines": {
     "vscode": "^1.100.0"
   },
