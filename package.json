@@ -9,19 +9,43 @@
   "categories": [
     "Other"
   ],
+  "activationEvents": [
+    "onCommand:unity-asset-viewer.viewAsset"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "unity-asset-viewer.viewAsset",
-        "title": "Ver Asset da Unity"
+        "command": "unity-asset-viewer.viewResource",
+        "title": "Ver Recurso da Unity (.asset/.prefab)"
+      },
+      {
+        "command": "unity-asset-viewer.setLanguage",
+        "title": "Unity Asset Viewer: Set Language / Definir Idioma"
       }
     ],
+    "configuration": {
+      "type": "object",
+      "title": "Unity Asset Viewer",
+      "properties": {
+        "unityAssetViewer.language": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "en", "pt"],
+          "enumDescriptions": [
+            "Detect from VS Code / Detectar do VS Code",
+            "English",
+            "Português"
+          ],
+          "description": "Language for the extension / Idioma da extensão"
+        }
+      }
+    },
     "menus": {
         "explorer/context": [
             {
-                "when": "resourceExtname == .asset",
-                "command": "unity-asset-viewer.viewAsset",
+                "when": "resourceExtname == .asset || resourceExtname == .prefab",
+                "command": "unity-asset-viewer.viewResource",
                 "group": "navigation"
             }
         ]
