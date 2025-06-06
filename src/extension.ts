@@ -2,46 +2,23 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { I18n } from './i18n/i18n';
 
-const SUPPORTED_EXTENSIONS = ['.asset', '.prefab'];
 const guidCache = new Map<string, string>();
 let currentPanel: vscode.WebviewPanel | undefined = undefined;
 let currentResourcePath: string | undefined = undefined;
 let currentResourceFileName: string | undefined = undefined;
 let currentMainGuid: string | undefined = undefined;
 
-// Inicializa o sistema de localização
-const i18n = I18n.getInstance();
+const SUPPORTED_EXTENSIONS = ['.asset', '.prefab'];
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Unity Asset/Prefab Viewer/Editor is now active!');
 
-    // Registra o comando para mudar o idioma
-    let languageCommand = vscode.commands.registerCommand('unity-asset-viewer.setLanguage', async () => {
-        const selected = await vscode.window.showQuickPick(
-            [
-                { label: 'English', value: 'en' },
-                { label: 'Português', value: 'pt' }
-            ],
-            { placeHolder: 'Select Language / Selecione o Idioma' }
-        );
-
-        if (selected) {
-            await vscode.workspace.getConfiguration('unityAssetViewer').update('language', selected.value, true);
-            i18n.setLanguage(selected.value as 'en' | 'pt');
-            if (currentPanel) {
-                await updateWebviewContent();
-            }
-        }
-    });
-
-    // Registra o comando principal
-    let viewCommand = vscode.commands.registerCommand('unity-asset-viewer.viewResource', async (uri: vscode.Uri) => {
+    let disposable = vscode.commands.registerCommand('unity-asset-viewer.viewResource', async (uri: vscode.Uri) => {
         const resourceUri = uri || vscode.window.activeTextEditor?.document.uri;
 
         if (!resourceUri || !SUPPORTED_EXTENSIONS.some(ext => resourceUri.fsPath.endsWith(ext))) {
-            vscode.window.showWarningMessage(i18n.getString('errorNotSupportedFile'));
+            vscode.window.showWarningMessage(`Abra um arquivo .asset ou .prefab da Unity e tente novamente.`);
             return;
         }
 
@@ -54,11 +31,11 @@ export function activate(context: vscode.ExtensionContext) {
 
             if (currentPanel) {
                 currentPanel.reveal(vscode.ViewColumn.One);
-                currentPanel.title = `${i18n.getString(resourceUri.fsPath.endsWith('.prefab') ? 'resourceTypePrefab' : 'resourceTypeAsset')}: ${currentResourceFileName}`;
+                currentPanel.title = `Recurso: ${currentResourceFileName}`;
             } else {
                 currentPanel = vscode.window.createWebviewPanel(
                     'unityResourceView',
-                    `${i18n.getString(resourceUri.fsPath.endsWith('.prefab') ? 'resourceTypePrefab' : 'resourceTypeAsset')}: ${currentResourceFileName}`,
+                    `Recurso: ${currentResourceFileName}`,
                     vscode.ViewColumn.One,
                     {
                         enableScripts: true,
@@ -69,6 +46,8 @@ export function activate(context: vscode.ExtensionContext) {
                 currentPanel.onDidDispose(() => {
                     currentPanel = undefined;
                     currentResourcePath = undefined;
+                    currentResourceFileName = undefined;
+                    currentMainGuid = undefined;
                     guidCache.clear();
                 }, null, context.subscriptions);
 
@@ -90,18 +69,12 @@ export function activate(context: vscode.ExtensionContext) {
             await updateWebviewContent();
 
         } catch (error) {
-            vscode.window.showErrorMessage(i18n.getString('errorProcessingResource', error));
+            vscode.window.showErrorMessage(`Falha ao processar o recurso: ${error instanceof Error ? error.message : String(error)}`);
+            console.error(`Falha ao processar o recurso:`, error);
         }
     });
 
-    context.subscriptions.push(languageCommand, viewCommand);
-
-    // Configura o idioma inicial
-    const config = vscode.workspace.getConfiguration('unityAssetViewer');
-    const language = config.get<string>('language', 'auto');
-    if (language !== 'auto') {
-        i18n.setLanguage(language as 'en' | 'pt');
-    }
+    context.subscriptions.push(disposable);
 }
 
 async function updateWebviewContent() {
@@ -110,29 +83,27 @@ async function updateWebviewContent() {
     }
     try {
         const resourceContent = await fs.readFile(currentResourcePath, 'utf8');
-        const guidsInResource = [...resourceContent.matchAll(/guid:\s*([a-fA-F0-9]{32})/g)].map(match => match[1]);
+        // Regex para extrair GUIDs de várias formas de referência - ADICIONADO FLAG GLOBAL 'g'
+        const guidExtractionRegex = /guid:\s*([a-fA-F0-9]{32})/g; 
+        const allMatches = [...resourceContent.matchAll(guidExtractionRegex)];
+        const guidsInResource = allMatches.map(match => match[1]);
         
         vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: i18n.getString('statusAnalyzing', currentResourceFileName),
+            title: `Analisando ${currentResourceFileName}...`,
             cancellable: false
         }, async (progress) => {
-            progress.report({ increment: 0, message: i18n.getString('statusReadingRefs') });
+            progress.report({ increment: 0, message: "Lendo referências..." });
             const resolvedGuids = await resolveGuids(guidsInResource, progress);
-            progress.report({ increment: 100, message: i18n.getString('statusRendering') });
-            if (currentPanel) {
-                 currentPanel.webview.html = getWebviewContent(
-                     currentResourceFileName!,
-                     currentMainGuid!,
-                     resourceContent,
-                     resolvedGuids,
-                     path.extname(currentResourcePath!)
-                 );
+            progress.report({ increment: 100, message: "Renderizando..." });
+            if (currentPanel) { // Verifica se o painel ainda existe
+                 currentPanel.webview.html = getWebviewContent(currentResourceFileName!, currentMainGuid!, resourceContent, resolvedGuids, path.extname(currentResourcePath!));
             }
         });
 
     } catch (error) {
-        vscode.window.showErrorMessage(i18n.getString('errorProcessingResource', error));
+        vscode.window.showErrorMessage(`Erro ao atualizar visualização: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`Erro ao atualizar visualização:`, error);
     }
 }
 
@@ -140,78 +111,83 @@ async function handleChangeGuidRequest(originalFullMatch: string, oldGuid: strin
     if (!currentResourcePath) return;
 
     try {
-        const allMetaUris = await vscode.workspace.findFiles('**/*.meta', '**/node_modules/**');
+        const allMetaUris = await vscode.workspace.findFiles('**/*.meta', '**/[Ll]ibrary/**'); // Ignora Library
         if (!allMetaUris.length) {
-            vscode.window.showErrorMessage(i18n.getString('errorNoMetaFiles'));
+            vscode.window.showErrorMessage('Nenhum arquivo .meta encontrado no projeto para referenciar.');
             return;
         }
 
         const assetItemsPromises = allMetaUris.map(async (metaUri) => {
             let itemGuid = '';
-            let itemMetaFound = false;
             try {
                 const metaContent = await fs.readFile(metaUri.fsPath, 'utf8');
                 const guidMatch = metaContent.match(/guid:\s*([a-fA-F0-9]{32})/);
                 if (guidMatch && guidMatch[1]) {
                     itemGuid = guidMatch[1];
-                    itemMetaFound = true;
                 }
-            } catch { /* Silencia erro se .meta não for encontrado */ }
+            } catch { /* Silencia erro */ }
             
             const assetNameFromMeta = path.basename(metaUri.fsPath.replace('.meta', ''));
             const actualAssetPath = metaUri.fsPath.replace('.meta', '');
 
             return {
                 label: assetNameFromMeta,
-                description: itemMetaFound ? `GUID: ${itemGuid}` : i18n.getString('guidNotFound'),
+                description: itemGuid ? `GUID: ${itemGuid}` : 'GUID não encontrado',
                 detail: actualAssetPath,
                 guid: itemGuid,
-                originalAssetPath: actualAssetPath
             };
         });
 
-        const assetItems = (await Promise.all(assetItemsPromises))
-                            .filter(item => item.guid !== '');
+        const assetItems = (await Promise.all(assetItemsPromises)).filter(item => item.guid);
 
         if (!assetItems.length) {
-            vscode.window.showErrorMessage(i18n.getString('errorNoValidGuids'));
+            vscode.window.showErrorMessage('Nenhum asset com GUID válido encontrado para seleção.');
             return;
         }
         
         const selectedItem = await vscode.window.showQuickPick(assetItems, {
-            placeHolder: i18n.getString('selectNewResource', oldAssetName, oldGuid),
+            placeHolder: `Substituir ref. a "${oldAssetName}" (GUID: ${oldGuid}). Selecione o NOVO recurso:`,
             matchOnDescription: true,
             matchOnDetail: true
         });
 
         if (!selectedItem || !selectedItem.guid) {
-            vscode.window.showInformationMessage(i18n.getString('noChangesMade'));
+            vscode.window.showInformationMessage('Nenhuma alteração feita.');
             return;
         }
 
-        const newGuid = selectedItem.guid;
+        const newGuidHex = selectedItem.guid; // Este é o GUID hexadecimal do novo asset selecionado
+
+        // `oldGuid` é o GUID hexadecimal da referência original que foi clicada.
+        // `originalFullMatch` é a string completa da referência original (ex: "{fileID: 123, guid: XXX, type: 3}").
+        // Nós queremos substituir o `oldGuid` (XXX) por `newGuidHex` (YYY) dentro de `originalFullMatch`.
+        
+        let newReferenceString = originalFullMatch.replace(oldGuid, newGuidHex);
+
         let currentContent = await fs.readFile(currentResourcePath, 'utf8');
-        const newGuidStringReplacement = `guid: ${newGuid}`;
+        
+        // Confirma que o GUID que estamos prestes a substituir ainda é o esperado.
+        // Esta verificação é uma segurança extra. `oldGuid` é o parâmetro da função, que veio do clique.
+        const guidStillInOriginalMatch = originalFullMatch.match(/guid:\s*([a-fA-F0-9]{32})/);
 
-        const guidInOriginalMatch = originalFullMatch.match(/guid:\s*([a-fA-F0-9]{32})/);
-
-        if (guidInOriginalMatch && guidInOriginalMatch[1] === oldGuid) {
+        if (guidStillInOriginalMatch && guidStillInOriginalMatch[1] === oldGuid) {
             if (currentContent.includes(originalFullMatch)) {
-                currentContent = currentContent.replace(originalFullMatch, newGuidStringReplacement);
+                currentContent = currentContent.replace(originalFullMatch, newReferenceString);
                 await fs.writeFile(currentResourcePath, currentContent, 'utf8');
-                vscode.window.showInformationMessage(i18n.getString('referenceUpdated', oldAssetName, selectedItem.label, path.basename(currentResourcePath)));
+                vscode.window.showInformationMessage(`Referência para "${oldAssetName}" atualizada para "${selectedItem.label}" em ${path.basename(currentResourcePath)}.`);
                 
-                guidCache.clear();
+                guidCache.clear(); 
                 await updateWebviewContent();
             } else {
-                vscode.window.showErrorMessage(i18n.getString('errorReferenceNotFound', originalFullMatch));
+                vscode.window.showErrorMessage(`A referência original "${originalFullMatch}" não foi encontrada no arquivo. O arquivo pode ter sido modificado externamente. Tente reabrir o recurso.`);
             }
         } else {
-             vscode.window.showErrorMessage(i18n.getString('errorGuidMismatch'));
+             vscode.window.showErrorMessage(`O GUID na referência clicada (${guidStillInOriginalMatch ? guidStillInOriginalMatch[1] : 'N/A'}) não corresponde ao GUID esperado (${oldGuid}) para substituição. Nenhuma alteração feita.`);
         }
 
     } catch (error) {
-        vscode.window.showErrorMessage(i18n.getString('errorChangingGuid', error));
+        vscode.window.showErrorMessage(`Erro ao alterar referência do GUID: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`Erro ao alterar referência do GUID:`, error);
     }
 }
 
@@ -219,9 +195,9 @@ async function getMainGuid(metaPath: string): Promise<string> {
     try {
         const metaContent = await fs.readFile(metaPath, 'utf8');
         const guidMatch = metaContent.match(/guid:\s*([a-fA-F0-9]{32})/);
-        return guidMatch ? guidMatch[1] : i18n.getString('guidNotFound');
+        return guidMatch ? guidMatch[1] : 'GUID principal não encontrado';
     } catch {
-        return i18n.getString('guidNotFound');
+        return `Arquivo .meta (${path.basename(metaPath)}) não encontrado`;
     }
 }
 
@@ -232,7 +208,7 @@ async function resolveGuids(guids: string[], progress?: vscode.Progress<{ messag
     let resolvedCount = 0;
 
     if (totalGuidsToResolve > 0 && progress) {
-        progress.report({ message: i18n.getString('statusSearchingGuids', totalGuidsToResolve) });
+        progress.report({ message: `Procurando ${totalGuidsToResolve} GUIDs novos...` });
     }
 
     const allMetaFiles = await vscode.workspace.findFiles('**/*.meta', '**/[Ll]ibrary/**');
@@ -247,64 +223,94 @@ async function resolveGuids(guids: string[], progress?: vscode.Progress<{ messag
         for (const metaUri of allMetaFiles) {
             try {
                 const metaContent = await fs.readFile(metaUri.fsPath, 'utf8');
-                if (metaContent.includes(`guid: ${guid}`)) {
+                if (metaContent.includes(`guid: ${guid}`)) { 
                     const assetName = path.basename(metaUri.fsPath.replace('.meta', ''));
                     resolved.set(guid, assetName);
                     guidCache.set(guid, assetName);
                     found = true;
-                    break;
+                    break; 
                 }
-            } catch (e) { /* Ignora erros de leitura de meta arquivos individuais */ }
+            } catch (e) { /* Ignora erros */ }
+        }
+        if (!found) {
+            // guidCache.set(guid, `GUID_NOT_FOUND:${guid}`); 
+            // resolved.set(guid, `GUID_NOT_FOUND:${guid}`);
         }
 
         if (totalGuidsToResolve > 0 && progress) {
             resolvedCount++;
-            progress.report({ 
-                increment: 100 / totalGuidsToResolve,
-                message: i18n.getString('statusResolved', resolvedCount, totalGuidsToResolve)
-            });
+            const increment = totalGuidsToResolve > 0 ? (resolvedCount / totalGuidsToResolve) * 100 : 100;
+            progress.report({ increment: increment, message: `Resolvidos ${resolvedCount}/${totalGuidsToResolve}...` });
         }
     }
     return resolved;
 }
 
 function getWebviewContent(
-    fileName: string,
-    mainGuid: string,
-    resourceContent: string,
+    fileName: string, 
+    mainGuid: string, 
+    resourceContent: string, 
     resolvedGuids: Map<string, string>,
     fileExtension: string
 ) {
-    let matchIndex = 0;
-    const resourceTypeDisplay = i18n.getString(fileExtension === '.prefab' ? 'resourceTypePrefab' : 'resourceTypeAsset');
+    let matchIndex = 0; 
+    const resourceTypeDisplay = fileExtension === '.prefab' ? 'Prefab' : 'Recurso'; // Ajustado para "Recurso" em vez de "Asset"
+
+    // Regex para encontrar referências:
+    // 1. {fileID: F, guid: G, type: T}
+    // 2. guid: G, type: T
+    // 3. guid: G
+    // Captura o GUID em cada caso para resolução.
+    const referencePattern = /(\{fileID:\s*-?\d+,\s*guid:\s*([a-fA-F0-9]{32}),\s*type:\s*\d+\}|\bguid:\s*([a-fA-F0-9]{32}),\s*type:\s*\d+\b|\bguid:\s*([a-fA-F0-9]{32})\b)/g;
 
     const processedContent = resourceContent
         .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/(guid:\s*[a-fA-F0-9]{32}|guid:\s*[a-fA-F0-9]{32},\s*type:\s*\d+)/g, (fullMatchWithPossibleType) => {
-            const guidOnlyMatchResult = fullMatchWithPossibleType.match(/guid:\s*([a-fA-F0-9]{32})/);
-            if (!guidOnlyMatchResult || !guidOnlyMatchResult[1]) return fullMatchWithPossibleType;
+        .replace(referencePattern, (
+            fullMatch,         // A string completa da referência encontrada
+            guidInObjectForm,  // GUID do grupo 1 (se for forma {fileID,guid,type})
+            guidInGuidTypeForm,// GUID do grupo 2 (se for forma guid,type)
+            guidInGuidOnlyForm // GUID do grupo 3 (se for forma guid apenas)
+        ) => { 
+            // Determina qual GUID foi capturado. A regex garante que apenas um desses grupos de GUID terá valor.
+            // É importante pegar o GUID correto da regex de referência, que pode estar em diferentes grupos de captura.
+            // A regex referencePattern tem 3 grupos principais de captura para o GUID, dependendo da forma da referência.
+            // O grupo 2 é para {fileID, guid, type}, o grupo 3 é para guid, type, e o grupo 4 é para guid sozinho.
+            // Corrigindo para pegar o grupo correto que contém apenas o GUID hexadecimal.
+            // O parâmetro `guidInObjectForm` que você está usando na verdade captura a *string completa* da forma {fileID, guid, type}, e não apenas o guid.
+            // É preciso ajustar qual grupo de captura da regex `referencePattern` realmente contém o GUID puro.
+            // A regex é: /(\{fileID..., guid: (GUID1), ...\}|\bguid: (GUID2), ...\b|\bguid: (GUID3)\b)/g
+            // Então, os GUIDs puros são nos grupos de captura 2, 4, 6 (considerando que cada (...) é um grupo).
+            // Melhorando a extração do GUID do fullMatch:
+            const guidMatchResult = fullMatch.match(/guid:\s*([a-fA-F0-9]{32})/);
+            const guid = guidMatchResult ? guidMatchResult[1] : null;
+
+
+            if (!guid) return fullMatch; // Segurança
             
-            const guid = guidOnlyMatchResult[1];
             const resolvedName = resolvedGuids.get(guid);
             const currentMatchId = `match-${matchIndex++}`;
 
             if (resolvedName && !resolvedName.startsWith("GUID_NOT_FOUND:")) {
-                return `<span class="guid-ref" id="${currentMatchId}" title="${i18n.getString('clickToChangeRef', resolvedName, guid)}" onclick="handleChangeGuid('${encodeURIComponent(fullMatchWithPossibleType)}', '${guid}', '${resolvedName.replace(/'/g, "\\'")}')">${fullMatchWithPossibleType} <span class="resolved-name">(${resolvedName})</span></span>`;
+                // `fullMatch` é a string original completa (ex: "{fileID: 123, guid: XXX, type: 3}")
+                // `guid` é apenas o valor hexadecimal do GUID (ex: "XXX")
+                return `<span class="guid-ref" id="${currentMatchId}" title="Clique para alterar referência: ${resolvedName} (GUID: ${guid})" onclick="handleChangeGuid('${encodeURIComponent(fullMatch)}', '${guid}', '${resolvedName.replace(/'/g, "\\'")}')">${fullMatch} <span class="resolved-name">(${resolvedName})</span></span>`;
             }
-            return fullMatchWithPossibleType + (resolvedName && resolvedName.startsWith("GUID_NOT_FOUND:") ? ` <span class="unresolved-name">${i18n.getString('externalReference')}</span>` : '');
+            // Se não resolvido, ou marcado como "não encontrado", apenas mostra o fullMatch
+            // Adicionamos uma classe para "não encontrado" para possível estilização
+            return fullMatch + (resolvedName && resolvedName.startsWith("GUID_NOT_FOUND:") ? ` <span class="unresolved-name">(Referência Externa/Não Encontrada no Projeto)</span>` : (resolvedGuids.has(guid) ? '' : ` <span class="unresolved-name">(Não Resolvido)</span>`));
         });
 
     return `
         <!DOCTYPE html>
-        <html lang="${i18n.getCurrentLanguage()}">
+        <html lang="pt-br">
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://*.vscode-cdn.net; img-src data: https:;">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' vscode-resource:; script-src 'unsafe-inline' vscode-resource: https://*.vscode-cdn.net; img-src data: https: vscode-resource:;">
             <title>Unity ${resourceTypeDisplay}: ${fileName}</title>
             <style>
                 body { 
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol';
                     padding: 20px; 
                     line-height: 1.6; 
                     background-color: var(--vscode-editor-background); 
@@ -340,27 +346,27 @@ function getWebviewContent(
                     cursor: pointer; 
                     text-decoration: underline;
                     text-decoration-style: dotted;
-                    color: var(--vscode-textLink-foreground);
+                    color: var(--vscode-textLink-foreground); 
                 }
                 .guid-ref:hover { 
                     background-color: var(--vscode-list-hoverBackground); 
                 }
                 .resolved-name { 
-                    color: var(--vscode-descriptionForeground);
+                    color: var(--vscode-descriptionForeground); 
                     font-style: italic;
                 }
                 .unresolved-name {
-                    color: var(--vscode-editorWarning-foreground);
-                    font-style: italic;
+                     color: var(--vscode-editorWarning-foreground);
+                     font-style: italic;
                 }
             </style>
         </head>
         <body>
             <h1>${resourceTypeDisplay}: ${fileName}</h1>
             <div class="guid-box">
-                ${i18n.getString('mainGuid')}: <span class="main-guid">${mainGuid}</span>
+                GUID Principal: <span class="main-guid">${mainGuid}</span>
             </div>
-            <h2>${i18n.getString('contentHeader')}</h2>
+            <h2>Conteúdo do ${resourceTypeDisplay} (GUIDs clicáveis para edição):</h2>
             <pre><code>${processedContent}</code></pre>
 
             <script>
@@ -374,7 +380,7 @@ function getWebviewContent(
                     vscode.postMessage({
                         command: 'requestChangeGuid',
                         originalFullMatch: originalFullMatch,
-                        oldGuid: oldGuid,
+                        oldGuid: oldGuid, // Este é o valor hexadecimal do GUID
                         oldAssetName: oldAssetName
                     });
                 }
